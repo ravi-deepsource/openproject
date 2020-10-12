@@ -33,6 +33,23 @@
 module API
   module Helpers
     module AttachmentRenderer
+      def self.content_endpoint(&block)
+        ->(*) {
+          helpers ::API::Helpers::AttachmentRenderer
+
+          finally do
+            set_cache_headers
+          end
+
+          get do
+            attachment = instance_exec(&block)
+            # Cache that value at max 604799 seconds, which is the max
+            # allowed expiry time for AWS generated links
+            respond_with_attachment attachment, cache_seconds: max_aws_cache_seconds
+          end
+        }
+      end
+
       ##
       # Render an attachment, either by redirecting
       # to the external storage,
@@ -44,22 +61,47 @@ module API
       #                                Defaults to no cache headers.
       def respond_with_attachment(attachment, cache_seconds: nil)
         if cache_seconds
-          set_cache_headers!(cache_seconds)
+          prepare_cache_headers(cache_seconds)
         end
 
         if attachment.external_storage?
-          redirect attachment.external_url(expires_in: cache_seconds).to_s
+          redirect_to_external_attachment
         else
-          content_type attachment.content_type
-          header['Content-Disposition'] = "#{attachment.content_disposition}; filename=#{attachment.filename}"
-          env['api.format'] = :binary
-          file attachment.diskfile.path
+          send_attachment
         end
       end
 
-      def set_cache_headers!(seconds)
-        header "Cache-Control", "public, max-age=#{seconds}"
-        header "Expires", CGI.rfc1123_date(Time.now.utc + seconds)
+      private
+
+      def redirect_to_external_attachment
+        set_cache_headers!
+        redirect attachment.external_url(expires_in: cache_seconds).to_s
+      end
+
+      def send_attachment
+        content_type attachment.content_type
+        header['Content-Disposition'] = "#{attachment.content_disposition}; filename=#{attachment.filename}"
+        env['api.format'] = :binary
+        sendfile attachment.diskfile.path
+      end
+
+      def set_cache_headers
+        set_cache_headers! if @stream
+      end
+
+      def prepare_cache_headers(seconds)
+        @prepared_cache_headers = { "Cache-Control" => "public, max-age=#{seconds}",
+                                    "Expires" => CGI.rfc1123_date(Time.now.utc + seconds) }
+      end
+
+      def set_cache_headers!
+        @prepared_cache_headers.each do |key, value|
+          header key, value
+        end
+      end
+
+      def max_aws_cache_seconds
+        604799
       end
 
       def avatar_link_expires_in
